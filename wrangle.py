@@ -10,7 +10,12 @@ import env
 
 from env import user, password, host
 
-def get_zillow_data():
+##--------------------Get Data------------------##
+
+def get_connection(db, user=env.user, host=env.host, password=env.password):
+    return f'mysql+pymysql://{user}:{password}@{host}/{db}'
+
+def acquire_zillow():
     ''' Retrieve data from Zillow database within codeup, selecting specific features
     If data is not present in directory, this function writes a copy as a csv file. 
     '''
@@ -20,14 +25,21 @@ def get_zillow_data():
         return pd.read_csv(filename)
     else:
         # read the SQL query into a dataframe
-        query = '''
-            
-        SELECT *
+        query = '''SELECT *
         FROM properties_2017
-        LEFT JOIN propertylandusetype USING(propertylandusetypeid)
-        JOIN predictions_2017 USING (parcelid)
-        WHERE propertylandusedesc IN ("Single Family Residential",                       
-                              "Inferred Single Family Residential")'''
+        LEFT JOIN predictions_2017 USING (parcelid)
+        LEFT JOIN heatingorsystemtype USING (heatingorsystemtypeid)
+        LEFT JOIN buildingclasstype USING (buildingclasstypeid)
+        LEFT JOIN architecturalstyletype USING (architecturalstyletypeid)
+        LEFT JOIN airconditioningtype USING (airconditioningtypeid)
+        LEFT JOIN storytype USING (storytypeid)
+        LEFT JOIN typeconstructiontype USING (typeconstructiontypeid)
+        LEFT JOIN propertylandusetype USING (propertylandusetypeid)
+        LEFT JOIN unique_properties USING (parcelid)
+        WHERE transactiondate LIKE '2017%%'
+        AND latitude is not NULL
+        AND longitude is not NULL
+        AND (propertylandusetypeid = 261 OR propertylandusetypeid = 279);'''
         df = pd.read_sql(query, get_connection('zillow'))
 
         # Write that dataframe to disk for later. Called "caching" the data for later.
@@ -36,81 +48,70 @@ def get_zillow_data():
         # Return the dataframe to the calling code
         return df
     
-def get_connection(db, user=env.user, host=env.host, password=env.password):
-    return f'mysql+pymysql://{user}:{password}@{host}/{db}'
+##-------------------Summarize-------------------##
 
-    
-def remove_outliers(df,feature_list):
-    ''' utilizes IQR to remove data which lies beyond 
-    three standard deviations of the mean
+def summarize(df):
     '''
-    for feature in feature_list:
-    
-        #define interquartile range
-        Q1= df[feature].quantile(0.25)
-        Q3 = df[feature].quantile(0.75)
-        IQR = Q3 - Q1
-        #Set limits
-        upper_limit = Q3 + 3 * IQR
-        lower_limit = Q1 - 3 * IQR
-        #remove outliers
-        df = df[(df[feature] > lower_limit) & (df[feature] < upper_limit)]
-    
-    return df
-    
-def clean_zillow(df):
-    ''' This function takes in zillow data, renames columns, replaces whitespace with nan values,
-    and drops null values. This function returns a df.
+    summarize will take in a single argument (a pandas dataframe) 
+    and output to console various statistics on said dataframe, including:
+    # .head()
+    # .info()
+    # .describe()
+    # .value_counts()
+    # observation of nulls in the dataframe
     '''
-    # Replace a whitespace sequence or empty with a NaN value and reassign this manipulation to df. 
-    df = df.replace(r'^\s*$', np.nan, regex=True)
+    print('SUMMARY REPORT')
+    print('=====================================================\n\n')
+    print('Dataframe head: ')
+    print(df.head(3))
+    print('=====================================================\n\n')
+    print('Dataframe info: ')
+    print(df.info())
+    print('=====================================================\n\n')
+    print('Dataframe Description: ')
+    print(df.describe())
+    num_cols = [col for col in df.columns if df[col].dtype != 'O']
+    cat_cols = [col for col in df.columns if col not in num_cols]
+    print('=====================================================')
+    print('DataFrame value counts: ')
+    for col in df.columns:
+        if col in cat_cols:
+            print(df[col].value_counts(), '\n')
+        else:
+            print(df[col].value_counts(bins=10, sort=False), '\n')
+    print('=====================================================')
+    print('nulls in dataframe by column: ')
+    print(nulls_by_col(df))
+    print('=====================================================')
+    print('nulls in dataframe by row: ')
+    print(nulls_by_row(df))
+    print('=====================================================')
     
-    # Removes null values
-    df = df.dropna()
+##-------------------Null Values-----------------##
     
-    # Converting some columns from float to integers or objects
-    df["fips"] = df["fips"].astype(int)
-    df["yearbuilt"] = df["yearbuilt"].astype(int)
-    df["bedroomcnt"] = df["bedroomcnt"].astype(int)    
-    df["lotsizesquarefeet"] = df["lotsizesquarefeet"].astype(int)
-    df["taxvaluedollarcnt"] = df["taxvaluedollarcnt"].astype(int)
-    
-    # Relabeling FIPS data
-    df['county'] = df.fips.replace({6037:'Los Angeles',
-                       6059:'Orange',
-                       6111:'Ventura'})
-    
-    # Creating new column for home age using year_built, casting as integer
-    df['home_age'] = 2017- df.yearbuilt
-    df["home_age"] = df["home_age"].astype(int)
-    
-    # renaming columns
-    df = df.rename(columns = {'bedroomcnt':'bedrooms', 
-                              'bathroomcnt':'bathrooms', 
-                              'calculatedfinishedsquarefeet':'square_feet',
-                              'taxvaluedollarcnt':'tax_value', 
-                              'yearbuilt':'year_built',
-                              'lotsizesquarefeet' : 'lot_size',
-                              'transactiondate' : 'transaction_date',
-                              'parcelid' : 'parcel_id'}
-                                )
-    #remove outliers
-    df = remove_outliers(df,['bedrooms','bathrooms','square_feet','tax_value'])
-    
-    return df
+def nulls_by_col(df):
+    num_missing = df.isnull().sum()
+    rows = df.shape[0]
+    percent_missing = num_missing/ rows *100
+    cols_missing = pd.DataFrame({'num_rows_missing': num_missing, 'percent_rows_missing' : percent_missing})
+    return cols_missing.sort_values(by='num_rows_missing', ascending=False)
 
-def train_validate_test_split(df, seed=123):
-    '''
-    This function takes in a dataframe, the name of the target variable
-    (for stratification purposes), and an integer for a setting a seed
-    and splits the data into train, validate and test. 
-    Test is 15% of the original dataset, validate is .1765*.85= 15% of the 
-    original dataset, and train is 75% of the original dataset. 
-    The function returns, in this order, train, validate and test dataframes. 
-    '''
-    train_validate, test = train_test_split(df, test_size=0.15, 
-                                            random_state=seed)
-    train, validate = train_test_split(train_validate, test_size=0.1765, 
-                                       random_state=seed)
-    return train, validate, test
+def nulls_by_rows(df):
+    '''This function takes in a df and calculates the number of rows with null values
+    and the percentage of rows with null values, returns a df with these values in columns'''
+    num_missing = df.isnull().sum(axis=1)
+    percent_miss = num_missing / df.shape[1]*100
+    rows = df.shape[0]
+    percent_missing = num_missing/ rows *100
+    cols_missing = pd.DataFrame({'num_rows_missing': num_missing, 'percent_rows_missing' : percent_missing})
+    return cols_missing.sort_values(by='num_rows_missing', ascending=False)
+
+def handle_missing_values(df, prop_required_columns=0.5, prop_required_rows=0.75):
+    '''This function drop rows or columns based on the percent of values that are missing,
+    dropping columns before rows'''
+    column_threshold = int(round(prop_required_columns * len(df.index), 0))
+    df = df.dropna(axis=1, thresh=column_threshold)
+    row_threshold = int(round(prop_required_rows * len(df.columns), 0))
+    df = df.dropna(axis=0, thresh=row_threshold)
+    return df
 
